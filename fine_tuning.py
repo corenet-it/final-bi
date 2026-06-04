@@ -10,7 +10,9 @@ from logging_utils import get_logger
 
 
 logger = get_logger("fine_tuning")
-CLASS_ORDER = ["bicycle", "car", "motorcycle", "bus", "truck"]
+# Must match config.ROBOFLOW_CLASSES so labels written by roboflow_dataset.py
+# (car=0, bus=1, truck=2, motorcycle=3, bicycle=4) stay consistent across datasets.
+CLASS_ORDER = ["car", "bus", "truck", "motorcycle", "bicycle"]
 
 
 def dataset_dir(root: Path | str | None = None) -> Path:

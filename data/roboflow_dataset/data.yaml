@@ -1,4 +1,4 @@
-path: /Users/behruz/Documents/Assignments 2026 - 3 kurs/Semestr 2/Business Inteligence/code/data/roboflow_dataset
+path: /home/asadbek/Desktop/final-bi/data/roboflow_dataset
 train: images/train
 val: images/val
 

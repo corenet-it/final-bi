@@ -1,0 +1,10 @@
+path: /Users/behruz/Documents/Assignments 2026 - 3 kurs/Semestr 2/Business Inteligence/code/data/roboflow_dataset
+train: images/train
+val: images/val
+
+names:
+  0: car
+  1: bus
+  2: truck
+  3: motorcycle
+  4: bicycle

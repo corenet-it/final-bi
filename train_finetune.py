@@ -1,12 +1,3 @@
-"""Fine-tune yolo11n on the cleaned ASSBI vehicle dataset.
-
-Works on any machine (Linux/Mac). It first regenerates data.yaml so the
-absolute `path:` matches THIS machine, then auto-selects the fastest device
-(Apple Silicon `mps`, NVIDIA `cuda`, otherwise `cpu`).
-
-Run:  python train_finetune.py
-Output: data/fine_tuning/runs/vehicle_surveillance/weights/best.pt
-"""
 from pathlib import Path
 
 import torch
@@ -14,9 +5,9 @@ from ultralytics import YOLO
 
 from roboflow_dataset import write_data_yaml
 
-BASE = "yolo11n.pt"          # ultralytics auto-downloads this
-PROJECT = "data/fine_tuning/runs"
-NAME = "vehicle_surveillance"
+BASE = "yolo26n.pt"          # ultralytics auto-downloads this
+PROJECT = "data/dataset"
+NAME = "surveillance"
 
 
 def pick_device() -> str:
@@ -40,8 +31,7 @@ def main() -> None:
         imgsz=512,
         batch=16,
         device=device,
-        workers=8,
-        patience=10,        # early stop if val stops improving
+        workers=2,
         cache=False,
         project=PROJECT,
         name=NAME,

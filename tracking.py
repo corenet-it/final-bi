@@ -4,7 +4,17 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from config import DEFAULT_DB_PATH, DEFAULT_MODEL, DEFAULT_YOUTUBE_URL, ENABLE_ROBOFLOW_DATASET_EXPORT, TARGET_CLASSES
+from config import (
+    DEFAULT_DB_PATH,
+    DEFAULT_MODEL,
+    DEFAULT_YOUTUBE_URL,
+    ENABLE_ROBOFLOW_DATASET_EXPORT,
+    ENABLE_VEHICLE_RECOGNITION,
+    TARGET_CLASSES,
+    TRACKING_DISPLAY_WIDTH,
+    TRACKING_FRAME_STRIDE,
+    TRACKING_INFERENCE_WIDTH,
+)
 from database import create_video, insert_many_detections, upsert_roi_zone
 from logging_utils import get_logger
 from roboflow_dataset import save_sample as save_roboflow_sample
@@ -81,6 +91,23 @@ def draw_polygon(frame, points: list[tuple[int, int]]) -> None:
         cv2.line(frame, points[index], points[(index + 1) % len(points)], (0, 180, 255), 2)
 
 
+def resize_for_width(frame, target_width: int):
+    import cv2
+
+    if target_width <= 0 or frame.shape[1] <= target_width:
+        return frame, 1.0
+    scale = target_width / frame.shape[1]
+    target_height = max(1, int(frame.shape[0] * scale))
+    resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+
+def scale_bbox_to_original(bbox: tuple[float, float, float, float], scale: float) -> tuple[float, float, float, float]:
+    if scale == 1.0:
+        return bbox
+    return tuple(value / scale for value in bbox)
+
+
 def validate_model_path(model_name: str) -> None:
     if ("/" in model_name or model_name.endswith(".pt")) and not Path(model_name).exists():
         raise FileNotFoundError(
@@ -102,13 +129,15 @@ def run_tracking() -> None:
     roi_name = f"roi_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     model_name = DEFAULT_MODEL
     confidence = 0.35
-    frame_stride = 1
+    frame_stride = TRACKING_FRAME_STRIDE
     max_frames = 0
     print(
         "Auto settings:",
         f"model={model_name}",
         f"confidence={confidence}",
         f"frame_stride={frame_stride}",
+        f"inference_width={TRACKING_INFERENCE_WIDTH or 'original'}",
+        f"vehicle_recognition={'on' if ENABLE_VEHICLE_RECOGNITION else 'off'}",
         "max_frames=unlimited",
     )
     validate_model_path(model_name)
@@ -123,6 +152,7 @@ def run_tracking() -> None:
 
     stream_url = resolve_video_source(source_url)
     cap = cv2.VideoCapture(stream_url)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         logger.error("video_open_failed source_url=%s", source_url)
         raise RuntimeError("Video ochilmadi. URL yoki network accessni tekshiring.")
@@ -171,7 +201,8 @@ def run_tracking() -> None:
         if frame_number % frame_stride == 0:
             timestamp_sec = float(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
             detected_at = datetime.utcnow().isoformat(timespec="seconds")
-            results = model.track(frame, persist=True, conf=confidence, verbose=False)
+            inference_frame, inference_scale = resize_for_width(frame, TRACKING_INFERENCE_WIDTH)
+            results = model.track(inference_frame, persist=True, conf=confidence, verbose=False)
 
             for result in results:
                 if result.boxes is None:
@@ -181,7 +212,7 @@ def run_tracking() -> None:
                     class_name = str(class_names[class_id])
                     if class_name not in TARGET_CLASSES:
                         continue
-                    x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
+                    x1, y1, x2, y2 = scale_bbox_to_original(tuple(float(v) for v in box.xyxy[0]), inference_scale)
                     cx = (x1 + x2) / 2
                     cy = (y1 + y2) / 2
                     if not point_in_polygon((cx, cy), roi_pixels):
@@ -196,14 +227,16 @@ def run_tracking() -> None:
                         seen_tracks.add(track_key)
                         pending_unique += 1
                         display_ids[track_key] = saved + pending_unique
-                        vehicle_info = recognize_vehicle_model(
-                            frame,
-                            (x1, y1, x2, y2),
-                            class_name=class_name,
-                            video_id=video_id,
-                            roi_zone_id=roi_zone_id,
-                            track_id=track_id,
-                        )
+                        vehicle_info = {}
+                        if ENABLE_VEHICLE_RECOGNITION:
+                            vehicle_info = recognize_vehicle_model(
+                                frame,
+                                (x1, y1, x2, y2),
+                                class_name=class_name,
+                                video_id=video_id,
+                                roi_zone_id=roi_zone_id,
+                                track_id=track_id,
+                            )
                         if ENABLE_ROBOFLOW_DATASET_EXPORT:
                             save_roboflow_sample(
                                 frame,
@@ -248,7 +281,8 @@ def run_tracking() -> None:
 
         draw_polygon(frame, roi_pixels)
         cv2.putText(frame, f"Unique saved: {saved + pending_unique} | Frame: {frame_number}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.imshow(WINDOW_NAME, frame)
+        display_frame, _ = resize_for_width(frame, TRACKING_DISPLAY_WIDTH)
+        cv2.imshow(WINDOW_NAME, display_frame)
         if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
             break
         frame_number += 1

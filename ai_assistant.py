@@ -25,6 +25,7 @@ from analytics import (
 from config import OPENAI_MODEL
 from database import fetch_chat_history, save_chat_query
 from logging_utils import get_logger
+from vector_store import index_chat_exchange, rag_context_text, rebuild_project_index, vector_stats
 
 
 logger = get_logger("ai_assistant")
@@ -139,6 +140,26 @@ ANALYTICS_INTENT_WORDS = {
     "hisobot",
 }
 
+PROJECT_HELP_WORDS = {
+    "qanday",
+    "qanaqa",
+    "ishlat",
+    "run",
+    "komanda",
+    "command",
+    "xato",
+    "error",
+    "muammo",
+    "qotib",
+    "sekin",
+    "cookie",
+    "youtube",
+    "setup",
+    "sozla",
+    "config",
+    "env",
+}
+
 
 def _is_in_scope(question: str, history: list[dict] | None = None) -> bool:
     q = question.lower().strip()
@@ -218,6 +239,8 @@ def _tool_result(name: str, db_path: Path | str, arguments: str | None) -> str:
     df = load_detection_frame(db_path)
     args = json.loads(arguments or "{}")
 
+    if name == "get_rag_context":
+        return rag_context_text(args.get("query") or "", db_path, top_k=int(args.get("top_k", 5)))
     if name == "get_short_memory":
         return json.dumps(fetch_chat_history(db_path, limit=int(args.get("limit", 8))), default=str)
     if name == "get_system_capabilities":
@@ -284,6 +307,22 @@ def _tool_result(name: str, db_path: Path | str, arguments: str | None) -> str:
 
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_rag_context",
+            "description": "Search the local SQLite vector store for relevant project documentation and previous chat memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -472,6 +511,42 @@ TOOLS = [
 ]
 
 
+def _save_answer(question: str, answer: str, db_path: Path | str) -> None:
+    save_chat_query(question, answer, db_path)
+    try:
+        index_chat_exchange(question, answer, db_path)
+    except Exception as exc:
+        logger.warning("assistant_memory_vector_index_failed error=%s", type(exc).__name__)
+
+
+def _looks_like_project_help(question: str) -> bool:
+    q = question.lower()
+    return any(word in q for word in PROJECT_HELP_WORDS)
+
+
+def _local_rag_answer(question: str, rag_context: str) -> str:
+    if not rag_context or rag_context == "No RAG context found.":
+        return ""
+    snippets = []
+    for block in rag_context.split("\n\n"):
+        lines = block.strip().splitlines()
+        if len(lines) >= 2:
+            source = lines[0].strip()
+            if "source=chat_memory:" in source:
+                continue
+            content = " ".join(lines[1:]).strip()
+            snippets.append(f"- {content[:450]} ({source})")
+        if len(snippets) >= 3:
+            break
+    if not snippets:
+        return ""
+    return (
+        "RAG memorydan topilgan project ma'lumotlariga ko'ra:\n"
+        + "\n".join(snippets)
+        + "\n\nAniq analytics sonlari kerak bo'lsa, class, ROI, confidence yoki unique track bo'yicha savol bering."
+    )
+
+
 def _local_memory_answer(question: str, df, history: list[dict]) -> str:
     q = question.lower().strip()
     if q in SMALL_TALK or any(q.startswith(word) for word in ["salom", "rahmat", "ok", "yaxshi"]):
@@ -503,6 +578,12 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
     df = load_detection_frame(db_path)
     history = fetch_chat_history(db_path, limit=8)
     logger.info("assistant_question_received chars=%s use_openai=%s history=%s", len(question), use_openai, len(history))
+    try:
+        stats = vector_stats(db_path)
+        if stats["total"] == 0:
+            rebuild_project_index(db_path)
+    except Exception as exc:
+        logger.warning("assistant_rag_prepare_failed error=%s", type(exc).__name__)
 
     if not _is_in_scope(question, history):
         answer = (
@@ -510,14 +591,17 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
             "Men vehicle tracking, ROI, YOLO/OpenCV, SQLite database, Streamlit dashboard, "
             "confidence, data quality, privacy/security yoki loyiha ishlatish bo'yicha yordam bera olaman."
         )
-        save_chat_query(question, answer, db_path)
+        _save_answer(question, answer, db_path)
         logger.info("assistant_question_rejected_offtopic chars=%s", len(question))
         return answer
 
-    fallback = _local_memory_answer(question, df, history)
+    rag_context = rag_context_text(question, db_path, top_k=5)
+    fallback = _local_rag_answer(question, rag_context) if _looks_like_project_help(question) else ""
+    if not fallback:
+        fallback = _local_memory_answer(question, df, history)
 
     if not use_openai or not os.getenv("OPENAI_API_KEY"):
-        save_chat_query(question, fallback, db_path)
+        _save_answer(question, fallback, db_path)
         logger.info("assistant_answered_local reason=%s", "disabled" if not use_openai else "missing_api_key")
         return fallback
 
@@ -525,6 +609,8 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
         from openai import OpenAI
 
         client = OpenAI()
+        selected_model = os.getenv("OPENAI_MODEL", OPENAI_MODEL)
+        logger.info("assistant_openai_started model=%s", selected_model)
         memory = _memory_text(history)
         compact_data = compact_context_for_llm(df)
         messages = [
@@ -534,9 +620,12 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
                 "content": (
                     "Short memory from recent Ask Data messages:\n"
                     f"{memory}\n\n"
+                    "Relevant RAG context from the local SQLite vector store:\n"
+                    f"{rag_context}\n\n"
                     "Compact current database context:\n"
                     f"{compact_data}\n\n"
-                    "Use the memory only for conversation continuity. Use tools for exact values when the user asks for analytics."
+                    "Use memory for conversation continuity, RAG context for project/how-to explanations, "
+                    "and tools for exact analytics values."
                 ),
             },
             {"role": "user", "content": question},
@@ -544,7 +633,7 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
         answer = ""
         for _ in range(3):
             response = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", OPENAI_MODEL),
+                model=selected_model,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
@@ -567,7 +656,7 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
                 )
         if not answer:
             final_response = client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", OPENAI_MODEL),
+                model=selected_model,
                 messages=messages,
                 temperature=0,
             )
@@ -578,6 +667,6 @@ def answer_question(question: str, db_path: Path | str, use_openai: bool = True)
         answer = f"{fallback}\n\nOpenAI javobi olinmadi: {exc}"
         logger.exception("assistant_openai_failed error=%s", type(exc).__name__)
 
-    save_chat_query(question, answer, db_path)
+    _save_answer(question, answer, db_path)
     logger.info("assistant_answer_saved chars=%s", len(answer))
     return answer

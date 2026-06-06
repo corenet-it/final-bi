@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DEFAULT_DB_PATH = Path(os.getenv("SURVEILLANCE_DB", DATA_DIR / "surveillance.db"))
@@ -14,6 +19,12 @@ LOG_FILE = Path(os.getenv("ASSBI_LOG_FILE", LOG_DIR / "app.log"))
 FINE_TUNING_DIR = Path(os.getenv("ASSBI_FINE_TUNING_DIR", DATA_DIR / "fine_tuning"))
 ROBOFLOW_DATASET_DIR = Path(os.getenv("ASSBI_ROBOFLOW_DATASET_DIR", DATA_DIR / "roboflow_dataset"))
 ENABLE_ROBOFLOW_DATASET_EXPORT = os.getenv("ENABLE_ROBOFLOW_DATASET_EXPORT", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_VEHICLE_RECOGNITION = os.getenv("ASSBI_ENABLE_VEHICLE_RECOGNITION", "0").strip().lower() not in {"0", "false", "no"}
+TRACKING_FRAME_STRIDE = max(1, int(os.getenv("ASSBI_TRACKING_FRAME_STRIDE", "1")))
+TRACKING_INFERENCE_WIDTH = max(0, int(os.getenv("ASSBI_TRACKING_INFERENCE_WIDTH", "960")))
+TRACKING_DISPLAY_WIDTH = max(0, int(os.getenv("ASSBI_TRACKING_DISPLAY_WIDTH", "1280")))
+YTDLP_COOKIES_FROM_BROWSER = os.getenv("ASSBI_YTDLP_COOKIES_FROM_BROWSER", "chrome").strip()
+YTDLP_COOKIE_FILE = os.getenv("ASSBI_YTDLP_COOKIE_FILE", "").strip()
 
 DEFAULT_YOUTUBE_URL = "https://www.youtube.com/watch?v=7uG-gbg0I8Y"
 DEFAULT_MODEL = os.getenv("ASSBI_YOLO_MODEL", "yolo11n.pt")

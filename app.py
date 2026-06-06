@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import plotly.express as px
@@ -21,9 +22,10 @@ from analytics import (
     vehicle_model_counts,
     video_counts,
 )
-from config import DEFAULT_DB_PATH
-from database import clear_chat_history, fetch_chat_history, init_db
+from config import DEFAULT_DB_PATH, OPENAI_MODEL
+from database import chat_history_count, clear_chat_history, fetch_chat_history, init_db, prune_chat_history
 from logging_utils import get_logger
+from vector_store import clear_vectors, rebuild_project_index, vector_stats
 
 load_dotenv()
 logger = get_logger("app")
@@ -224,6 +226,14 @@ with tab_overview:
 with tab_assistant:
     st.subheader("Ask the Collected Data")
     use_openai = st.toggle("Use OpenAI when API key exists", value=True)
+    selected_openai_model = os.getenv("OPENAI_MODEL", OPENAI_MODEL)
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+    if use_openai and has_openai_key:
+        st.success(f"OpenAI connected. Chatbot model: `{selected_openai_model}`")
+    elif use_openai:
+        st.warning("OpenAI API key topilmadi. Chatbot hozir local analytics fallback bilan javob beradi.")
+    else:
+        st.info("OpenAI o'chirilgan. Chatbot local analytics fallback bilan javob beradi.")
 
     if "chat_messages" not in st.session_state:
         saved_history = fetch_chat_history(db_path, limit=8)
@@ -236,17 +246,44 @@ with tab_assistant:
     if "last_chart_context" not in st.session_state:
         st.session_state.last_chart_context = st.session_state.last_question
 
-    memory_col, clear_col = st.columns([3, 1])
-    with memory_col:
-        st.caption("Short memory: oxirgi chatlar SQLite `chat_queries` jadvalida saqlanadi va follow-up savollarda ishlatiladi.")
-    with clear_col:
-        if st.button("Clear memory", key="clear_chat_memory"):
-            clear_chat_history(db_path)
-            logger.info("dashboard_memory_cleared db_path=%s", db_path)
-            st.session_state.chat_messages = []
-            st.session_state.last_question = ""
-            st.session_state.last_chart_context = ""
-            st.rerun()
+    try:
+        rag_stats = vector_stats(db_path)
+    except Exception:
+        rag_stats = {"total": 0, "by_source": {}}
+    st.caption(
+        "Short memory SQLite `chat_queries`da, RAG memory esa SQLite `rag_vectors` vector table'da saqlanadi. "
+        f"Chat memory: {chat_history_count(db_path)} | Vector chunks: {rag_stats['total']}"
+    )
+
+    with st.expander("Memory management", expanded=False):
+        st.write("RAG vector store project docs, README va oldingi Ask Data suhbatlarini qidirish uchun ishlatiladi.")
+        st.json(rag_stats)
+        mem_col1, mem_col2, mem_col3, mem_col4 = st.columns(4)
+        with mem_col1:
+            if st.button("Rebuild RAG", key="rebuild_rag_index"):
+                with st.spinner("Project docs vector index qayta qurilmoqda..."):
+                    chunks = rebuild_project_index(db_path)
+                st.success(f"RAG index rebuilt: {chunks} chunks")
+                st.rerun()
+        with mem_col2:
+            if st.button("Clear RAG memory", key="clear_rag_memory"):
+                deleted = clear_vectors(db_path, source_type="chat_memory")
+                st.success(f"Chat vector memory cleared: {deleted}")
+                st.rerun()
+        with mem_col3:
+            if st.button("Keep last 20 chats", key="prune_chat_memory"):
+                deleted = prune_chat_history(db_path, keep_last=20)
+                st.success(f"Old chat memory removed: {deleted}")
+                st.rerun()
+        with mem_col4:
+            if st.button("Clear all chat", key="clear_chat_memory"):
+                clear_chat_history(db_path)
+                clear_vectors(db_path, source_type="chat_memory")
+                logger.info("dashboard_memory_cleared db_path=%s", db_path)
+                st.session_state.chat_messages = []
+                st.session_state.last_question = ""
+                st.session_state.last_chart_context = ""
+                st.rerun()
 
     examples = [
         "Unique car va truck sonini solishtir",
@@ -266,7 +303,12 @@ with tab_assistant:
     prompt = st.chat_input("Bazadagi tracking datadan savol so'rang")
     question = st.session_state.pop("pending_question", None) or prompt
     if question:
-        answer = answer_question(question, db_path, use_openai=use_openai)
+        with st.chat_message("user"):
+            st.write(question)
+        with st.chat_message("assistant"):
+            with st.spinner("AI bazadan, memorydan va RAG vector store'dan qidirib javob tayyorlayapti..."):
+                answer = answer_question(question, db_path, use_openai=use_openai)
+            st.write(answer)
         st.session_state.chat_messages.append({"role": "user", "content": question})
         st.session_state.chat_messages.append({"role": "assistant", "content": answer})
         st.session_state.last_question = question

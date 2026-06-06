@@ -1,3 +1,33 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Virtual environments (rebuild per machine) ---
+.venv/
+venv/
+env/
+
+# --- YOLO base weights (ultralytics auto-downloads them) ---
+*.pt
+
+# --- Training outputs & local review artifacts ---
+runs/
+data/fine_tuning/
+
+# --- Generated data (not needed for fine-tuning) ---
+data/crops/
+data/logs/
+data/matplotlib_cache/
+*.cache
+data/surveillance.db
+
+# --- Secrets ---
+.env
+
+# --- Editor / OS / harness ---
+.DS_Store
+.claude/
 ../docs
 screenshot
-.venv

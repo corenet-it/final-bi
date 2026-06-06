@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS chat_queries (
 CREATE INDEX IF NOT EXISTS idx_detections_time ON detections(detected_at);
 CREATE INDEX IF NOT EXISTS idx_detections_class ON detections(class_name);
 CREATE INDEX IF NOT EXISTS idx_detections_track ON detections(track_id);
+"""
+
+
+UNIQUE_DETECTION_INDEX_SQL = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_detection_track
 ON detections(video_id, roi_zone_id, class_name, track_id)
 WHERE track_id IS NOT NULL;
@@ -84,6 +88,43 @@ WHERE track_id IS NOT NULL;
 
 def utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def deduplicate_detection_tracks(conn: sqlite3.Connection) -> int:
+    duplicate_count = conn.execute(
+        """
+        SELECT COALESCE(SUM(group_count - 1), 0)
+        FROM (
+            SELECT COUNT(*) AS group_count
+            FROM detections
+            WHERE track_id IS NOT NULL
+            GROUP BY video_id, roi_zone_id, class_name, track_id
+            HAVING COUNT(*) > 1
+        )
+        """
+    ).fetchone()[0]
+    duplicate_count = int(duplicate_count or 0)
+    if duplicate_count == 0:
+        return 0
+
+    duplicate_ids_sql = """
+        SELECT id
+        FROM (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY video_id, roi_zone_id, class_name, track_id
+                    ORDER BY confidence DESC, frame_number ASC, id ASC
+                ) AS row_rank
+            FROM detections
+            WHERE track_id IS NOT NULL
+        )
+        WHERE row_rank > 1
+    """
+    conn.execute(f"DELETE FROM track_events WHERE detection_id IN ({duplicate_ids_sql})")
+    conn.execute(f"DELETE FROM detections WHERE id IN ({duplicate_ids_sql})")
+    logger.info("detection_duplicates_removed count=%s", duplicate_count)
+    return duplicate_count
 
 
 def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
@@ -100,6 +141,8 @@ def ensure_schema_migrations(conn: sqlite3.Connection) -> None:
     for name, column_type in new_columns.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE detections ADD COLUMN {name} {column_type}")
+    deduplicate_detection_tracks(conn)
+    conn.execute(UNIQUE_DETECTION_INDEX_SQL)
 
 
 @contextmanager
@@ -289,6 +332,34 @@ def clear_chat_history(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     with connect(db_path) as conn:
         conn.execute("DELETE FROM chat_queries")
     logger.info("chat_history_cleared path=%s", db_path)
+
+
+def chat_history_count(db_path: Path | str = DEFAULT_DB_PATH) -> int:
+    init_db(db_path)
+    with connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM chat_queries").fetchone()[0])
+
+
+def prune_chat_history(db_path: Path | str = DEFAULT_DB_PATH, keep_last: int = 20) -> int:
+    init_db(db_path)
+    keep_last = max(0, int(keep_last))
+    with connect(db_path) as conn:
+        before = conn.total_changes
+        conn.execute(
+            """
+            DELETE FROM chat_queries
+            WHERE id NOT IN (
+                SELECT id
+                FROM chat_queries
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (keep_last,),
+        )
+        deleted = conn.total_changes - before
+    logger.info("chat_history_pruned keep_last=%s deleted=%s", keep_last, deleted)
+    return int(deleted)
 
 
 def fetch_detections(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
